@@ -8,12 +8,6 @@ require('dotenv').config();
 const secretKey = process.env.SECRET || 'secret-key';
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
 
-// Hardcoded user db
-const users = [
-  { id: 1, username: 'foo', password: 'bar' },
-  { id: 2, username: 'john', password: 'doe' },
-];
-
 const app = express();
 
 // Set view engine
@@ -24,6 +18,22 @@ const redisClient = redis.createClient({
   host: 'localhost',
   port: REDIS_PORT,
 });
+
+// Hardcoded user stored in redisClient db
+redisClient.hSet('foo', {
+  id: 1,
+  username: 'foo',
+  password: 'bar'
+});
+redisClient.hSet('john', {
+  id: 2,
+  username: 'john',
+  password: 'doe'
+});
+
+redisClient.on('connect', ()=>{
+  console.log("Connected to Redis Server");
+})
 
 // Link express-session with redis store
 app.use(
@@ -45,29 +55,39 @@ app.use(passport.session());
 
 // Define local auth strategy
 const localStrategy = new LocalStrategy((username, password, done) => {
-  const user = users.find(
-    (user) => user.username === username && user.password === password
-  );
-  if (user) {
-    return done(null, user);
-  } else {
-    return done(null, false);
+redisClient.hGetAll(username, (err, user)=>{
+  if(err){
+    return done(err);
   }
+  if(!user){
+    return done( null, false);
+  }
+  if(user.password !== password){
+    return done( null, false);
+  }
+  return done(null, user);
+})
 });
 passport.use(localStrategy);
 
 // Return the single parameter from user object
 // which we want to store in req.session
 passport.serializeUser((user, done) => {
-  done(null, user.id);
+  done(null, user.username);
 });
 
-passport.deserializeUser((id, done) => {
+passport.deserializeUser((username, done) => {
   // Do a db call to look up the user object using id
   // Here, we are hard coding it and call done method with
   // entire user object
-  const user = users.find((user) => user.id === id);
-  done(null, user);
+  redisClient.hGetAll(username, (err, user)=>{
+    if(err){
+      done(err);
+    }
+    if(user){
+      done(null, user);
+    }
+  })
 });
 
 app.get('/login', (req, res) => {
