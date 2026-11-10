@@ -3,39 +3,32 @@ const session = require('express-session');
 const redis = require('redis');
 const passport = require('passport');
 const LocalStrategy = require('passport-local').Strategy;
-const RedisStore = require('connect-redis')(session);
+const RedisStore = require('connect-redis').default; // v7 default export, pairs with redis v4
 require('dotenv').config();
 const secretKey = process.env.SECRET || 'secret-key';
-const REDIS_PORT = process.env.REDIS_PORT || 6379;
+const REDIS_PORT = Number(process.env.REDIS_PORT || 6379);
 
 const app = express();
 
 // Set view engine
 app.set('view engine', 'ejs');
 
-// Create Redis client
+// Parse login form posts; passport-local reads req.body
+app.use(express.urlencoded({ extended: false }));
+
+// Create Redis client (redis v4 API: promises, explicit connect).
+// The store only issues commands once requests arrive, and the server
+// starts listening after connect() resolves, so this ordering is safe.
 const redisClient = redis.createClient({
-  host: 'localhost',
-  port: REDIS_PORT,
+  socket: { host: 'localhost', port: REDIS_PORT },
+});
+redisClient.on('error', (err) => {
+  console.error('Redis client error:', err);
 });
 
-// Hardcoded user stored in redisClient db
-redisClient.hSet('foo', {
-  id: 1,
-  username: 'foo',
-  password: 'bar'
-});
-redisClient.hSet('john', {
-  id: 2,
-  username: 'john',
-  password: 'doe'
-});
-
-redisClient.on('connect', ()=>{
-  console.log("Connected to Redis Server");
-})
-
-// Link express-session with redis store
+// Link express-session with redis store.
+// secure:false so sessions work over plain local HTTP; flip to true
+// only behind real HTTPS.
 app.use(
   session({
     store: new RedisStore({ client: redisClient }),
@@ -43,7 +36,7 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: true, // for HTTPS
+      secure: false,
       maxAge: 1000 * 60 * 60 * 1, // 1 hour - input taken in ms
     },
   })
@@ -53,20 +46,20 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Define local auth strategy
-const localStrategy = new LocalStrategy((username, password, done) => {
-redisClient.hGetAll(username, (err, user)=>{
-  if(err){
+// Define local auth strategy against the seeded users in Redis
+const localStrategy = new LocalStrategy(async (username, password, done) => {
+  try {
+    const user = await redisClient.hGetAll(username);
+    if (!user || Object.keys(user).length === 0) {
+      return done(null, false);
+    }
+    if (user.password !== password) {
+      return done(null, false);
+    }
+    return done(null, user);
+  } catch (err) {
     return done(err);
   }
-  if(!user){
-    return done( null, false);
-  }
-  if(user.password !== password){
-    return done( null, false);
-  }
-  return done(null, user);
-})
 });
 passport.use(localStrategy);
 
@@ -76,18 +69,17 @@ passport.serializeUser((user, done) => {
   done(null, user.username);
 });
 
-passport.deserializeUser((username, done) => {
-  // Do a db call to look up the user object using id
-  // Here, we are hard coding it and call done method with
-  // entire user object
-  redisClient.hGetAll(username, (err, user)=>{
-    if(err){
-      done(err);
-    }
-    if(user){
+passport.deserializeUser(async (username, done) => {
+  try {
+    const user = await redisClient.hGetAll(username);
+    if (user && Object.keys(user).length > 0) {
       done(null, user);
+    } else {
+      done(null, false);
     }
-  })
+  } catch (err) {
+    done(err);
+  }
 });
 
 app.get('/login', (req, res) => {
@@ -110,6 +102,29 @@ app.get('/', (req, res) => {
     res.redirect('/login');
   }
 });
-app.listen(3000, () => {
-  console.log('Server listening on port 3000');
+
+async function main() {
+  await redisClient.connect();
+  console.log('Connected to Redis Server');
+
+  // Hardcoded demo users stored in Redis
+  await redisClient.hSet('foo', {
+    id: '1',
+    username: 'foo',
+    password: 'bar'
+  });
+  await redisClient.hSet('john', {
+    id: '2',
+    username: 'john',
+    password: 'doe'
+  });
+
+  app.listen(3000, () => {
+    console.log('Server listening on port 3000');
+  });
+}
+
+main().catch((err) => {
+  console.error('Failed to start:', err);
+  process.exit(1);
 });
